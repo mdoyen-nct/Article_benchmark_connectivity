@@ -40,6 +40,8 @@ end
 
 site = strtrim(string(data.(siteName)));
 pet = strtrim(string(data.(petName)));
+site(ismissing(data.(siteName))) = missing;
+pet(ismissing(data.(petName))) = missing;
 ageDecadeStart = floor(age / 10) * 10;
 ageDecade = strings(height(data), 1);
 validAge = ~isnan(ageDecadeStart);
@@ -139,8 +141,7 @@ for groupIndex = 1:numel(groups)
         accuracy(row) = safeDivide(tp(row) + tn(row), n(row));
         ppv(row) = safeDivide(tp(row), tp(row) + fp(row));
         npv(row) = safeDivide(tn(row), tn(row) + fn(row));
-        balancedAccuracy(row) = mean([sensitivity(row), specificity(row)], ...
-            'omitnan');
+        balancedAccuracy(row) = (sensitivity(row) + specificity(row)) / 2;
         positiveLikelihoodRatio(row) = sensitivity(row) / (1 - specificity(row));
         negativeLikelihoodRatio(row) = (1 - sensitivity(row)) / specificity(row);
     end
