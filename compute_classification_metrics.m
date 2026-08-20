@@ -15,8 +15,7 @@ if nargin < 2 || isempty(outputFile)
     outputFile = fullfile(scriptDirectory, 'classification_metrics.xlsx');
 end
 
-data = readtable(inputFile, 'Sheet', 'all', ...
-    'VariableNamingRule', 'preserve');
+data = readtable(inputFile, 'Sheet', 'all');
 
 ageName = findVariable(data, 'subject_age');
 siteName = findVariable(data, 'SITEID');
@@ -67,8 +66,9 @@ end
 
 function variableName = findVariable(data, requestedName)
 names = string(data.Properties.VariableNames);
-normalizedNames = lower(regexprep(strtrim(names), '\s+', ' '));
-normalizedRequestedName = lower(regexprep(strtrim(string(requestedName)), '\s+', ' '));
+normalizedNames = lower(regexprep(names, '[^a-zA-Z0-9]', ''));
+normalizedRequestedName = lower(regexprep(string(requestedName), ...
+    '[^a-zA-Z0-9]', ''));
 match = find(normalizedNames == normalizedRequestedName, 1);
 if isempty(match)
     error('Missing required column "%s".', requestedName);
