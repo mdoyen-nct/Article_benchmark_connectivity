@@ -55,13 +55,13 @@ overall = summarizeGroups(repmat("All", height(data), 1), 'Population', ...
 statisticalTests = testGroupEffects(site, pet, ageDecade, truth, ...
     predictions, classifierNames);
 statisticalNotes = table( ...
-    {'Test'; 'Outcomes'; 'AdjustedPValue'; 'Significant'; 'Pooling'; ...
+    {'Test'; 'Outcomes'; 'AdjustedPValue'; 'Significant'; 'Filtering'; ...
     'Assumptions'; 'Interpretation'}, ...
     {'Pearson chi-square test of equal performance across groups'; ...
     'Accuracy uses all subjects; Sensitivity uses Group=1; Specificity uses Group=0'; ...
     'Benjamini-Hochberg correction across all tests'; ...
     'AdjustedPValue < 0.05'; ...
-    'For each test, categories with fewer than 10 eligible subjects are pooled as Other'; ...
+    'For each test, categories with fewer than 10 eligible subjects are excluded'; ...
     'Use results marked Caution only as exploratory because expected counts are small'; ...
     'An association does not prove a causal effect; site and PET machine may be confounded'}, ...
     'VariableNames', {'Item', 'Description'});
@@ -227,8 +227,9 @@ for factorIndex = 1:numel(factorNames)
                 valid = valid & truth == 0;
             end
 
-            testedGroups = poolSmallGroups(groups(valid), 10);
             correct = prediction(valid) == truth(valid);
+            [testedGroups, included] = filterSmallGroups(groups(valid), 10);
+            correct = correct(included);
             [observed, groupCount] = correctnessTable(testedGroups, correct);
             [statistic, df, probability, effectSize, lowExpected, warning] = ...
                 chiSquareTest(observed);
@@ -236,7 +237,7 @@ for factorIndex = 1:numel(factorNames)
             factorOutput(row) = factorNames{factorIndex};
             outcomeOutput(row) = outcomeNames{outcomeIndex};
             classifierOutput(row) = classifierNames(classifierIndex);
-            n(row) = sum(valid);
+            n(row) = sum(included);
             numberOfGroups(row) = groupCount;
             chiSquare(row) = statistic;
             degreesOfFreedom(row) = df;
@@ -259,16 +260,15 @@ result = table(factorOutput, outcomeOutput, classifierOutput, n, ...
     'PercentExpectedBelowFive', 'Assumption'});
 end
 
-function groups = poolSmallGroups(groups, minimumSize)
+function [groups, included] = filterSmallGroups(groups, minimumSize)
 if isempty(groups)
+    included = false(size(groups));
     return;
 end
-[categories, ~, groupIndex] = unique(groups, 'sorted');
+[~, ~, groupIndex] = unique(groups, 'sorted');
 counts = accumarray(groupIndex, 1);
-smallCategories = categories(counts < minimumSize);
-for index = 1:numel(smallCategories)
-    groups(groups == smallCategories(index)) = "Other";
-end
+included = counts(groupIndex) >= minimumSize;
+groups = groups(included);
 end
 
 function [observed, numberOfGroups] = correctnessTable(groups, correct)
