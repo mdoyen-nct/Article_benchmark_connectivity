@@ -52,6 +52,18 @@ byPET = summarizeGroups(pet, 'PET', truth, predictions, classifierNames);
 byAge = summarizeGroups(ageDecade, 'AgeDecade', truth, predictions, classifierNames);
 overall = summarizeGroups(repmat("All", height(data), 1), 'Population', ...
     truth, predictions, classifierNames);
+statisticalTests = testGroupEffects(site, pet, ageDecade, truth, ...
+    predictions, classifierNames);
+statisticalNotes = table( ...
+    {'Test'; 'Outcomes'; 'AdjustedPValue'; 'Significant'; ...
+    'Assumptions'; 'Interpretation'}, ...
+    {'Pearson chi-square test of equal performance across groups'; ...
+    'Accuracy uses all subjects; Sensitivity uses Group=1; Specificity uses Group=0'; ...
+    'Benjamini-Hochberg correction across all tests'; ...
+    'AdjustedPValue < 0.05'; ...
+    'Use results marked Caution only as exploratory because expected counts are small'; ...
+    'An association does not prove a causal effect; site and PET machine may be confounded'}, ...
+    'VariableNames', {'Item', 'Description'});
 
 if isfile(outputFile)
     delete(outputFile);
@@ -60,6 +72,8 @@ writeResults(bySite, outputFile, 'BySite');
 writeResults(byPET, outputFile, 'ByPET');
 writeResults(byAge, outputFile, 'ByAgeDecade');
 writeResults(overall, outputFile, 'Overall');
+writeResults(statisticalTests, outputFile, 'StatisticalTests');
+writetable(statisticalNotes, outputFile, 'Sheet', 'StatisticalNotes');
 
 fprintf('Results written to %s\n', outputFile);
 end
@@ -175,4 +189,130 @@ for columnIndex = 1:width(result)
     end
 end
 writetable(result, outputFile, 'Sheet', sheetName);
+end
+
+function result = testGroupEffects(site, pet, ageDecade, truth, ...
+        predictions, classifierNames)
+factorValues = {site, pet, ageDecade};
+factorNames = {'SiteID', 'PET', 'AgeDecade'};
+outcomeNames = {'Accuracy', 'Sensitivity', 'Specificity'};
+numberOfRows = numel(factorNames) * numel(classifierNames) * ...
+    numel(outcomeNames);
+
+factorOutput = strings(numberOfRows, 1);
+outcomeOutput = strings(numberOfRows, 1);
+classifierOutput = strings(numberOfRows, 1);
+n = zeros(numberOfRows, 1);
+numberOfGroups = zeros(numberOfRows, 1);
+chiSquare = NaN(numberOfRows, 1);
+degreesOfFreedom = NaN(numberOfRows, 1);
+pValue = NaN(numberOfRows, 1);
+cramersV = NaN(numberOfRows, 1);
+percentExpectedBelowFive = NaN(numberOfRows, 1);
+assumption = strings(numberOfRows, 1);
+
+row = 0;
+for factorIndex = 1:numel(factorNames)
+    groups = factorValues{factorIndex};
+    validGroup = ~ismissing(groups) & strlength(groups) > 0;
+    for classifierIndex = 1:numel(classifierNames)
+        prediction = predictions(:, classifierIndex);
+        for outcomeIndex = 1:numel(outcomeNames)
+            row = row + 1;
+            valid = validGroup & ~isnan(truth) & ~isnan(prediction);
+            if outcomeIndex == 2
+                valid = valid & truth == 1;
+            elseif outcomeIndex == 3
+                valid = valid & truth == 0;
+            end
+
+            correct = prediction(valid) == truth(valid);
+            [observed, groupCount] = correctnessTable(groups(valid), correct);
+            [statistic, df, probability, effectSize, lowExpected, warning] = ...
+                chiSquareTest(observed);
+
+            factorOutput(row) = factorNames{factorIndex};
+            outcomeOutput(row) = outcomeNames{outcomeIndex};
+            classifierOutput(row) = classifierNames(classifierIndex);
+            n(row) = sum(valid);
+            numberOfGroups(row) = groupCount;
+            chiSquare(row) = statistic;
+            degreesOfFreedom(row) = df;
+            pValue(row) = probability;
+            cramersV(row) = effectSize;
+            percentExpectedBelowFive(row) = lowExpected;
+            assumption(row) = warning;
+        end
+    end
+end
+
+adjustedPValue = benjaminiHochberg(pValue);
+significant = adjustedPValue < 0.05;
+result = table(factorOutput, outcomeOutput, classifierOutput, n, ...
+    numberOfGroups, chiSquare, degreesOfFreedom, pValue, adjustedPValue, ...
+    significant, cramersV, percentExpectedBelowFive, assumption, ...
+    'VariableNames', {'Factor', 'Outcome', 'Classifier', 'N', ...
+    'NumberOfGroups', 'ChiSquare', 'DegreesOfFreedom', 'PValue', ...
+    'AdjustedPValue', 'Significant', 'CramersV', ...
+    'PercentExpectedBelowFive', 'Assumption'});
+end
+
+function [observed, numberOfGroups] = correctnessTable(groups, correct)
+if isempty(groups)
+    observed = zeros(0, 2);
+    numberOfGroups = 0;
+    return;
+end
+[~, ~, groupIndex] = unique(groups, 'sorted');
+numberOfGroups = max(groupIndex);
+correctCount = accumarray(groupIndex, double(correct), ...
+    [numberOfGroups, 1], @sum, 0);
+totalCount = accumarray(groupIndex, 1, [numberOfGroups, 1], @sum, 0);
+observed = [totalCount - correctCount, correctCount];
+end
+
+function [statistic, df, probability, effectSize, lowExpected, warning] = ...
+        chiSquareTest(observed)
+total = sum(observed(:));
+numberOfGroups = size(observed, 1);
+if total == 0 || numberOfGroups < 2 || any(sum(observed, 1) == 0)
+    statistic = NaN;
+    df = NaN;
+    probability = NaN;
+    effectSize = NaN;
+    lowExpected = NaN;
+    warning = "NotTestable";
+    return;
+end
+
+expected = sum(observed, 2) * sum(observed, 1) / total;
+statistic = sum(sum((observed - expected).^2 ./ expected));
+df = numberOfGroups - 1;
+probability = gammainc(statistic / 2, df / 2, 'upper');
+effectSize = sqrt(statistic / total);
+lowExpected = 100 * sum(expected(:) < 5) / numel(expected);
+if any(expected(:) < 1) || lowExpected > 20
+    warning = "Caution";
+else
+    warning = "Valid";
+end
+end
+
+function adjusted = benjaminiHochberg(probabilities)
+adjusted = NaN(size(probabilities));
+valid = ~isnan(probabilities);
+[sortedProbabilities, order] = sort(probabilities(valid));
+numberOfTests = numel(sortedProbabilities);
+if numberOfTests == 0
+    return;
+end
+
+sortedAdjusted = sortedProbabilities .* numberOfTests ./ (1:numberOfTests)';
+for index = numberOfTests - 1:-1:1
+    sortedAdjusted(index) = min(sortedAdjusted(index), ...
+        sortedAdjusted(index + 1));
+end
+sortedAdjusted = min(sortedAdjusted, 1);
+validIndices = find(valid);
+adjusted(validIndices(order)) = sortedAdjusted;
 end
