@@ -55,14 +55,18 @@ overall = summarizeGroups(repmat("All", height(data), 1), 'Population', ...
 statisticalTests = testGroupEffects(site, pet, ageDecade, truth, ...
     predictions, classifierNames);
 statisticalNotes = table( ...
-    {'Test'; 'Outcomes'; 'AdjustedPValue'; 'Significant'; 'Filtering'; ...
-    'Assumptions'; 'Interpretation'}, ...
-    {'Pearson chi-square test of equal performance across groups'; ...
+    {'Test'; 'Statistic'; 'Permutations'; 'RandomSeed'; 'Outcomes'; ...
+    'PValue'; 'AdjustedPValue'; 'Significant'; 'Filtering'; ...
+    'Interpretation'}, ...
+    {'Global Monte Carlo permutation test of equal performance across groups'; ...
+    'Group-size-weighted variance of performance rates'; ...
+    '10000 random permutations per test'; ...
+    '12345 for reproducible results'; ...
     'Accuracy uses all subjects; Sensitivity uses Group=1; Specificity uses Group=0'; ...
+    'Correct/incorrect labels are permuted while group membership and group sizes remain fixed'; ...
     'Benjamini-Hochberg correction across all tests'; ...
     'AdjustedPValue < 0.05'; ...
     'For each test, categories with fewer than 5 eligible subjects are excluded'; ...
-    'Use results marked Caution only as exploratory because expected counts are small'; ...
     'An association does not prove a causal effect; site and PET machine may be confounded'}, ...
     'VariableNames', {'Item', 'Description'});
 
@@ -197,6 +201,9 @@ function result = testGroupEffects(site, pet, ageDecade, truth, ...
 factorValues = {site, pet, ageDecade};
 factorNames = {'SiteID', 'PET', 'AgeDecade'};
 outcomeNames = {'Accuracy', 'Sensitivity', 'Specificity'};
+numberOfPermutations = 10000;
+randomSeed = 12345;
+randomStream = RandStream('mt19937ar', 'Seed', randomSeed);
 numberOfRows = numel(factorNames) * numel(classifierNames) * ...
     numel(outcomeNames);
 
@@ -205,12 +212,11 @@ outcomeOutput = strings(numberOfRows, 1);
 classifierOutput = strings(numberOfRows, 1);
 n = zeros(numberOfRows, 1);
 numberOfGroups = zeros(numberOfRows, 1);
-chiSquare = NaN(numberOfRows, 1);
-degreesOfFreedom = NaN(numberOfRows, 1);
+permutationStatistic = NaN(numberOfRows, 1);
 pValue = NaN(numberOfRows, 1);
-cramersV = NaN(numberOfRows, 1);
-percentExpectedBelowFive = NaN(numberOfRows, 1);
-assumption = strings(numberOfRows, 1);
+performanceRange = NaN(numberOfRows, 1);
+monteCarloStandardError = NaN(numberOfRows, 1);
+status = strings(numberOfRows, 1);
 
 row = 0;
 for factorIndex = 1:numel(factorNames)
@@ -230,21 +236,20 @@ for factorIndex = 1:numel(factorNames)
             correct = prediction(valid) == truth(valid);
             [testedGroups, included] = filterSmallGroups(groups(valid), 5);
             correct = correct(included);
-            [observed, groupCount] = correctnessTable(testedGroups, correct);
-            [statistic, df, probability, effectSize, lowExpected, warning] = ...
-                chiSquareTest(observed);
+            [statistic, probability, effectSize, standardError, testStatus, ...
+                groupCount] = permutationTest(testedGroups, correct, ...
+                numberOfPermutations, randomStream);
 
             factorOutput(row) = factorNames{factorIndex};
             outcomeOutput(row) = outcomeNames{outcomeIndex};
             classifierOutput(row) = classifierNames(classifierIndex);
             n(row) = sum(included);
             numberOfGroups(row) = groupCount;
-            chiSquare(row) = statistic;
-            degreesOfFreedom(row) = df;
+            permutationStatistic(row) = statistic;
             pValue(row) = probability;
-            cramersV(row) = effectSize;
-            percentExpectedBelowFive(row) = lowExpected;
-            assumption(row) = warning;
+            performanceRange(row) = effectSize;
+            monteCarloStandardError(row) = standardError;
+            status(row) = testStatus;
         end
     end
 end
@@ -252,12 +257,14 @@ end
 adjustedPValue = benjaminiHochberg(pValue);
 significant = adjustedPValue < 0.05;
 result = table(factorOutput, outcomeOutput, classifierOutput, n, ...
-    numberOfGroups, chiSquare, degreesOfFreedom, pValue, adjustedPValue, ...
-    significant, cramersV, percentExpectedBelowFive, assumption, ...
+    numberOfGroups, permutationStatistic, pValue, adjustedPValue, ...
+    significant, performanceRange, ...
+    repmat(numberOfPermutations, numberOfRows, 1), ...
+    monteCarloStandardError, status, ...
     'VariableNames', {'Factor', 'Outcome', 'Classifier', 'N', ...
-    'NumberOfGroups', 'ChiSquare', 'DegreesOfFreedom', 'PValue', ...
-    'AdjustedPValue', 'Significant', 'CramersV', ...
-    'PercentExpectedBelowFive', 'Assumption'});
+    'NumberOfGroups', 'PermutationStatistic', 'PValue', ...
+    'AdjustedPValue', 'Significant', 'PerformanceRange', ...
+    'NumberOfPermutations', 'MonteCarloStandardError', 'Status'});
 end
 
 function [groups, included] = filterSmallGroups(groups, minimumSize)
@@ -271,45 +278,59 @@ included = counts(groupIndex) >= minimumSize;
 groups = groups(included);
 end
 
-function [observed, numberOfGroups] = correctnessTable(groups, correct)
+function [statistic, probability, effectSize, standardError, status, ...
+        numberOfGroups] = permutationTest(groups, correct, ...
+        numberOfPermutations, randomStream)
 if isempty(groups)
-    observed = zeros(0, 2);
     numberOfGroups = 0;
-    return;
-end
-[~, ~, groupIndex] = unique(groups, 'sorted');
-numberOfGroups = max(groupIndex);
-correctCount = accumarray(groupIndex, double(correct), ...
-    [numberOfGroups, 1], @sum, 0);
-totalCount = accumarray(groupIndex, 1, [numberOfGroups, 1], @sum, 0);
-observed = [totalCount - correctCount, correctCount];
-end
-
-function [statistic, df, probability, effectSize, lowExpected, warning] = ...
-        chiSquareTest(observed)
-total = sum(observed(:));
-numberOfGroups = size(observed, 1);
-if total == 0 || numberOfGroups < 2 || any(sum(observed, 1) == 0)
     statistic = NaN;
-    df = NaN;
     probability = NaN;
     effectSize = NaN;
-    lowExpected = NaN;
-    warning = "NotTestable";
+    standardError = NaN;
+    status = "NotTestable";
     return;
 end
 
-expected = sum(observed, 2) * sum(observed, 1) / total;
-statistic = sum(sum((observed - expected).^2 ./ expected));
-df = numberOfGroups - 1;
-probability = gammainc(statistic / 2, df / 2, 'upper');
-effectSize = sqrt(statistic / total);
-lowExpected = 100 * sum(expected(:) < 5) / numel(expected);
-if any(expected(:) < 1) || lowExpected > 20
-    warning = "Caution";
-else
-    warning = "Valid";
+[~, ~, groupIndex] = unique(groups, 'sorted');
+numberOfGroups = max(groupIndex);
+if numberOfGroups < 2 || all(correct == correct(1))
+    statistic = NaN;
+    probability = NaN;
+    effectSize = NaN;
+    standardError = NaN;
+    status = "NotTestable";
+    return;
 end
+
+groupCounts = accumarray(groupIndex, 1, [numberOfGroups, 1], @sum, 0);
+statistic = globalPerformanceStatistic(groupIndex, correct, groupCounts);
+correctCounts = accumarray(groupIndex, double(correct), ...
+    [numberOfGroups, 1], @sum, 0);
+groupPerformance = correctCounts ./ groupCounts;
+effectSize = max(groupPerformance) - min(groupPerformance);
+
+exceedances = 0;
+for permutationIndex = 1:numberOfPermutations
+    permutation = randperm(randomStream, numel(correct));
+    permutedStatistic = globalPerformanceStatistic(groupIndex, ...
+        correct(permutation), groupCounts);
+    exceedances = exceedances + (permutedStatistic >= statistic);
+end
+probability = (exceedances + 1) / (numberOfPermutations + 1);
+standardError = sqrt(probability * (1 - probability) / ...
+    numberOfPermutations);
+status = "Valid";
+end
+
+function statistic = globalPerformanceStatistic(groupIndex, correct, ...
+        groupCounts)
+numberOfGroups = numel(groupCounts);
+correctCounts = accumarray(groupIndex, double(correct), ...
+    [numberOfGroups, 1], @sum, 0);
+groupPerformance = correctCounts ./ groupCounts;
+overallPerformance = sum(correct) / numel(correct);
+statistic = sum(groupCounts .* ...
+    (groupPerformance - overallPerformance).^2);
 end
 
 function adjusted = benjaminiHochberg(probabilities)
