@@ -52,21 +52,20 @@ byPET = summarizeGroups(pet, 'PET', truth, predictions, classifierNames);
 byAge = summarizeGroups(ageDecade, 'AgeDecade', truth, predictions, classifierNames);
 overall = summarizeGroups(repmat("All", height(data), 1), 'Population', ...
     truth, predictions, classifierNames);
-statisticalTests = testGroupEffects(site, pet, ageDecade, truth, ...
+statisticalTests = fitMixedEffectsModels(site, pet, ageDecade, truth, ...
     predictions, classifierNames);
 statisticalNotes = table( ...
-    {'Test'; 'Statistic'; 'Permutations'; 'RandomSeed'; 'Outcomes'; ...
-    'PValue'; 'AdjustedPValue'; 'Significant'; 'Filtering'; ...
+    {'Model'; 'Outcome'; 'FixedEffects'; 'RandomEffect'; 'Tests'; ...
+    'AdjustedPValue'; 'Significant'; 'Inclusion'; ...
     'Interpretation'}, ...
-    {'Global Monte Carlo permutation test of equal performance across groups'; ...
-    'Group-size-weighted variance of performance rates'; ...
-    '10000 random permutations per test'; ...
-    '12345 for reproducible results'; ...
-    'Accuracy uses all subjects; Sensitivity uses Group=1; Specificity uses Group=0'; ...
-    'Correct/incorrect labels are permuted while group membership and group sizes remain fixed'; ...
+    {'Mixed-effects logistic regression fitted separately for each classifier'; ...
+    'Classification correctness (correct=1, incorrect=0)'; ...
+    'PET and age decade'; ...
+    'Random intercept for center (SiteID)'; ...
+    'Global marginal F-test for each fixed effect'; ...
     'Benjamini-Hochberg correction across all tests'; ...
     'AdjustedPValue < 0.05'; ...
-    'For each test, categories with fewer than 5 eligible subjects are excluded'; ...
+    'All group sizes are included; only rows missing a model variable are excluded'; ...
     'An association does not prove a causal effect; site and PET machine may be confounded'}, ...
     'VariableNames', {'Item', 'Description'});
 
@@ -196,141 +195,70 @@ end
 writetable(result, outputFile, 'Sheet', sheetName);
 end
 
-function result = testGroupEffects(site, pet, ageDecade, truth, ...
+function result = fitMixedEffectsModels(site, pet, ageDecade, truth, ...
         predictions, classifierNames)
-factorValues = {site, pet, ageDecade};
-factorNames = {'SiteID', 'PET', 'AgeDecade'};
-outcomeNames = {'Accuracy', 'Sensitivity', 'Specificity'};
-numberOfPermutations = 10000;
-randomSeed = 12345;
-randomStream = RandStream('mt19937ar', 'Seed', randomSeed);
-numberOfRows = numel(factorNames) * numel(classifierNames) * ...
-    numel(outcomeNames);
+factorNames = ["PET", "AgeDecade"];
+numberOfRows = numel(factorNames) * numel(classifierNames);
 
 factorOutput = strings(numberOfRows, 1);
-outcomeOutput = strings(numberOfRows, 1);
 classifierOutput = strings(numberOfRows, 1);
 n = zeros(numberOfRows, 1);
-numberOfGroups = zeros(numberOfRows, 1);
-permutationStatistic = NaN(numberOfRows, 1);
+numberOfCenters = zeros(numberOfRows, 1);
+numberOfLevels = zeros(numberOfRows, 1);
+fStatistic = NaN(numberOfRows, 1);
+numeratorDegreesOfFreedom = NaN(numberOfRows, 1);
+denominatorDegreesOfFreedom = NaN(numberOfRows, 1);
 pValue = NaN(numberOfRows, 1);
-performanceRange = NaN(numberOfRows, 1);
-monteCarloStandardError = NaN(numberOfRows, 1);
-status = strings(numberOfRows, 1);
 
 row = 0;
-for factorIndex = 1:numel(factorNames)
-    groups = factorValues{factorIndex};
-    validGroup = ~ismissing(groups) & strlength(groups) > 0;
-    for classifierIndex = 1:numel(classifierNames)
-        prediction = predictions(:, classifierIndex);
-        for outcomeIndex = 1:numel(outcomeNames)
-            row = row + 1;
-            valid = validGroup & ~isnan(truth) & ~isnan(prediction);
-            if outcomeIndex == 2
-                valid = valid & truth == 1;
-            elseif outcomeIndex == 3
-                valid = valid & truth == 0;
-            end
+validModelVariables = ~ismissing(site) & strlength(site) > 0 & ...
+    ~ismissing(pet) & strlength(pet) > 0 & ...
+    ~ismissing(ageDecade) & strlength(ageDecade) > 0 & ~isnan(truth);
+for classifierIndex = 1:numel(classifierNames)
+    prediction = predictions(:, classifierIndex);
+    valid = validModelVariables & ~isnan(prediction);
+    modelData = table(categorical(site(valid)), categorical(pet(valid)), ...
+        categorical(ageDecade(valid)), prediction(valid) == truth(valid), ...
+        'VariableNames', {'Center', 'PET', 'AgeDecade', 'Correct'});
+    model = fitglme(modelData, ...
+        'Correct ~ PET + AgeDecade + (1|Center)', ...
+        'Distribution', 'Binomial', 'Link', 'Logit');
+    modelTests = anova(model);
 
-            correct = prediction(valid) == truth(valid);
-            [testedGroups, included] = filterSmallGroups(groups(valid), 5);
-            correct = correct(included);
-            [statistic, probability, effectSize, standardError, testStatus, ...
-                groupCount] = permutationTest(testedGroups, correct, ...
-                numberOfPermutations, randomStream);
-
-            factorOutput(row) = factorNames{factorIndex};
-            outcomeOutput(row) = outcomeNames{outcomeIndex};
-            classifierOutput(row) = classifierNames(classifierIndex);
-            n(row) = sum(included);
-            numberOfGroups(row) = groupCount;
-            permutationStatistic(row) = statistic;
-            pValue(row) = probability;
-            performanceRange(row) = effectSize;
-            monteCarloStandardError(row) = standardError;
-            status(row) = testStatus;
+    for factorIndex = 1:numel(factorNames)
+        row = row + 1;
+        testRow = find(string(modelTests.Properties.RowNames) == ...
+            factorNames(factorIndex), 1);
+        if isempty(testRow)
+            error('Mixed-effects model did not return a test for %s.', ...
+                factorNames(factorIndex));
         end
+
+        factorOutput(row) = factorNames(factorIndex);
+        classifierOutput(row) = classifierNames(classifierIndex);
+        n(row) = height(modelData);
+        numberOfCenters(row) = numel(categories(modelData.Center));
+        if factorNames(factorIndex) == "PET"
+            numberOfLevels(row) = numel(categories(modelData.PET));
+        else
+            numberOfLevels(row) = numel(categories(modelData.AgeDecade));
+        end
+        fStatistic(row) = modelTests.FStat(testRow);
+        numeratorDegreesOfFreedom(row) = modelTests.DF1(testRow);
+        denominatorDegreesOfFreedom(row) = modelTests.DF2(testRow);
+        pValue(row) = modelTests.pValue(testRow);
     end
 end
 
 adjustedPValue = benjaminiHochberg(pValue);
 significant = adjustedPValue < 0.05;
-result = table(factorOutput, outcomeOutput, classifierOutput, n, ...
-    numberOfGroups, permutationStatistic, pValue, adjustedPValue, ...
-    significant, performanceRange, ...
-    repmat(numberOfPermutations, numberOfRows, 1), ...
-    monteCarloStandardError, status, ...
-    'VariableNames', {'Factor', 'Outcome', 'Classifier', 'N', ...
-    'NumberOfGroups', 'PermutationStatistic', 'PValue', ...
-    'AdjustedPValue', 'Significant', 'PerformanceRange', ...
-    'NumberOfPermutations', 'MonteCarloStandardError', 'Status'});
-end
-
-function [groups, included] = filterSmallGroups(groups, minimumSize)
-if isempty(groups)
-    included = false(size(groups));
-    return;
-end
-[~, ~, groupIndex] = unique(groups, 'sorted');
-counts = accumarray(groupIndex, 1);
-included = counts(groupIndex) >= minimumSize;
-groups = groups(included);
-end
-
-function [statistic, probability, effectSize, standardError, status, ...
-        numberOfGroups] = permutationTest(groups, correct, ...
-        numberOfPermutations, randomStream)
-if isempty(groups)
-    numberOfGroups = 0;
-    statistic = NaN;
-    probability = NaN;
-    effectSize = NaN;
-    standardError = NaN;
-    status = "NotTestable";
-    return;
-end
-
-[~, ~, groupIndex] = unique(groups, 'sorted');
-numberOfGroups = max(groupIndex);
-if numberOfGroups < 2 || all(correct == correct(1))
-    statistic = NaN;
-    probability = NaN;
-    effectSize = NaN;
-    standardError = NaN;
-    status = "NotTestable";
-    return;
-end
-
-groupCounts = accumarray(groupIndex, 1, [numberOfGroups, 1], @sum, 0);
-statistic = globalPerformanceStatistic(groupIndex, correct, groupCounts);
-correctCounts = accumarray(groupIndex, double(correct), ...
-    [numberOfGroups, 1], @sum, 0);
-groupPerformance = correctCounts ./ groupCounts;
-effectSize = max(groupPerformance) - min(groupPerformance);
-
-exceedances = 0;
-for permutationIndex = 1:numberOfPermutations
-    permutation = randperm(randomStream, numel(correct));
-    permutedStatistic = globalPerformanceStatistic(groupIndex, ...
-        correct(permutation), groupCounts);
-    exceedances = exceedances + (permutedStatistic >= statistic);
-end
-probability = (exceedances + 1) / (numberOfPermutations + 1);
-standardError = sqrt(probability * (1 - probability) / ...
-    numberOfPermutations);
-status = "Valid";
-end
-
-function statistic = globalPerformanceStatistic(groupIndex, correct, ...
-        groupCounts)
-numberOfGroups = numel(groupCounts);
-correctCounts = accumarray(groupIndex, double(correct), ...
-    [numberOfGroups, 1], @sum, 0);
-groupPerformance = correctCounts ./ groupCounts;
-overallPerformance = sum(correct) / numel(correct);
-statistic = sum(groupCounts .* ...
-    (groupPerformance - overallPerformance).^2);
+result = table(factorOutput, classifierOutput, n, numberOfCenters, ...
+    numberOfLevels, fStatistic, numeratorDegreesOfFreedom, ...
+    denominatorDegreesOfFreedom, pValue, adjustedPValue, significant, ...
+    'VariableNames', {'Factor', 'Classifier', 'N', 'NumberOfCenters', ...
+    'NumberOfLevels', 'FStatistic', 'NumeratorDegreesOfFreedom', ...
+    'DenominatorDegreesOfFreedom', 'PValue', 'AdjustedPValue', ...
+    'Significant'});
 end
 
 function adjusted = benjaminiHochberg(probabilities)
