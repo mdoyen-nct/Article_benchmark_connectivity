@@ -56,10 +56,10 @@ overall = summarizeGroups(repmat("All", height(data), 1), 'Population', ...
 if isfile(outputFile)
     delete(outputFile);
 end
-writetable(bySite, outputFile, 'Sheet', 'BySite');
-writetable(byPET, outputFile, 'Sheet', 'ByPET');
-writetable(byAge, outputFile, 'Sheet', 'ByAgeDecade');
-writetable(overall, outputFile, 'Sheet', 'Overall');
+writeResults(bySite, outputFile, 'BySite');
+writeResults(byPET, outputFile, 'ByPET');
+writeResults(byAge, outputFile, 'ByAgeDecade');
+writeResults(overall, outputFile, 'Overall');
 
 fprintf('Results written to %s\n', outputFile);
 end
@@ -162,4 +162,17 @@ if denominator == 0
 else
     value = numerator / denominator;
 end
+end
+
+function writeResults(result, outputFile, sheetName)
+% Excel displays NaN values as empty cells; use NA to mark undefined metrics.
+for columnIndex = 1:width(result)
+    values = result{:, columnIndex};
+    if isnumeric(values) && any(isnan(values))
+        outputValues = num2cell(values);
+        outputValues(isnan(values)) = {'NA'};
+        result.(result.Properties.VariableNames{columnIndex}) = outputValues;
+    end
+end
+writetable(result, outputFile, 'Sheet', sheetName);
 end
